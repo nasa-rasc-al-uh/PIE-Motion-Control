@@ -1,5 +1,5 @@
 #/ Controller version = 2.60
-#/ Date = 5/18/2019 1:27 PM
+#/ Date = 6/5/2019 10:33 AM
 #/ User remarks = 
 #0
 AUTOEXEC:
@@ -22,7 +22,9 @@ ECAT_OUT2 = 7910
 ECAT_OUT3 = 7910
 
 
-ECIN(309, ECAT_IN1);
+ECIN(325, ECAT_IN1);
+ECIN(315, ECAT_IN_amperage);
+ECIN(311, ECAT_IN_water_level);
 
 xOffset = 177.64
 currentHomingAxis = -1
@@ -62,6 +64,13 @@ ENABLE Drill
 !SAFETYGROUP(X1,X2)
 ENABLE X1
 ENABLE X2
+
+Z1_RMS_limit = 7
+Z1_Jog_state =1
+Z1_fmax = Z1DrillVel
+Z1_fmin = 0
+
+Drill_RMS_limit = 30
 
 START 2,1
 START 3,1
@@ -137,12 +146,25 @@ WHILE running
 		if advanceState
 			DISP machineState
 		end
-		
 	elseif machineState = 300
+		
+		holeCount = holeCount + 1
+		
+		if holeCount = numHoles
+			machineState = 300
+		else
+			PTP/re xAxisGroup, holeSpacing, holeSpacing
+			machineState = drillState
+		end
+		
+	elseif machineState = 350
 	
 		machineState = 0
-		running = 0
-	
+		HALT ALL
+		ECAT_OUT1 = 0
+		ECAT_OUT2 = 0
+		ECAT_OUT3 = 0
+		pellet1_h1_SetTemp = 0
 	end
 	
 end
@@ -150,6 +172,10 @@ end
 if running = 0
 	machineState = 0
 	DISABLE ALL
+	ECAT_OUT1 = 0
+	ECAT_OUT2 = 0
+	ECAT_OUT3 = 0
+	pellet1_h1_SetTemp = 0
 end
 
 STOPALL
@@ -165,7 +191,7 @@ ON jogX
 			ENABLE xAxisGroup(0)
 			ENABLE xAxisGroup(1)
 			
-			if FPOS(X1) + jogX < 690
+			if FPOS(X1) + jogX < 736.5
 				PTP/re xAxisGroup, jogX, jogX
 			end
 			
@@ -185,7 +211,7 @@ ON jogZ1
 		end
 		jogZ1 = 0
 		
-		DISABLE Z1
+		!DISABLE Z1
 	end
 RET
 
@@ -228,6 +254,24 @@ RET
 ON ^jogBoreholePump
 	ECAT_OUT1.1 = 0;
 RET
+
+ON WOB_set_point
+
+	ENABLE Z1
+	PTP/ev Z1, wob_top_surface, 5
+	real pos
+	pos = -0.0055*WOB_set_point*WOB_set_point+0.3915*WOB_set_point-0.0298
+	PTP/rev Z1,-pos,1
+	WOB_set_point = 0
+	!JOG/v Z1, -5
+	!TILL RMS(Z1) > touchRMS
+	!HALT Z1
+	!WAIT 200
+	!wob_top_surface = FPOS(Z1)
+	!drillWOB = wob_top_surface - FPOS(Z1)
+	!PTP/re Z1, 
+	
+RET
 		
 if advanceState
 	machineState = 50
@@ -260,62 +304,63 @@ STOP
 #3
 ! Drilling Buffer
 
-local int localState
-localState = 0
+local int spinUpOffset
+drillLocalState = 0
+spinUpOffset = 0
 	
 WHILE running=1
 	if machineState = drillState
 	
-		if localState = 0
-			ENABLE X1
-			ENABLE X2
-			
-			PTP/re xAxisGroup, 500, 500 ! Move drill above the overburden
-		
+		if drillLocalState = 0
+					
 			real vel
-			vel = Z1DrillVel
+			vel = 5
 			ENABLE Z1
 			
 			JOG/v Z1, -vel
 			WAIT 1000
-			TILL RMS(Z1)>touchRMS ! Need to tune this, check for position error above threshold (e.g. until overburden is reached)
+			TILL RMS(Z1)>touchRMS | FPOS(Z1) < 5 ! Need to tune this, check for position error above threshold (e.g. until overburden is reached)
+			top_surface = FPOS(Z1)
+			drillLocalState = 10
 			
-			localState = 10
-			
-		elseif localState = 10
+		elseif drillLocalState = 10
 			HALT Z1
-			if FPOS(Z1) + 50 < 700
-				PTP/re Z1, 50 ! Move up 50 mm away from overburden to prepare for drill spin up
+			WAIT 200
+			ENABLE Z1
+			if (RPOS(Z1) + 20) < 700
+				WAIT 500
+				spinUpOffset = 20
+				PTP/re Z1, 20 ! Move up 20 mm away from overburden to prepare for drill spin up
 			end
-			localState = 50
+			drillLocalState = 50
 			
-		elseif localState = 50
+		elseif drillLocalState = 50	
 		
 			ENABLE Drill
 			JOG Drill
 			TILL ^MST(Drill).#ACC !Spin up drill and wait until it's done accelerating
-			localState = 100
+			drillLocalState = 100
 		
-		elseif localState = 100
+		elseif drillLocalState = 100
 			!Begin pecking
-			
+			VEL(Z1) = Z1DrillVel	
 			ENABLE Z1
-			PTP/rev Z1, (-50 - peckDistance), Z1DrillVel ! First peck after moving back to the surface of the overburden
-			PTP/re Z1, retractDistance ! Retract the drill
-			localState = 150
+			PTP/rev Z1, (-spinUpOffset - peckDistance), Z1DrillVel ! First peck after moving back to the surface of the overburden
+			!PTP/re Z1, retractDistance ! Retract the drill
+			drillLocalState = 150
 		
-		elseif localState = 150
+		elseif drillLocalState = 150
 		
-			if FPOS(Z1) > 5 + 172
+			if FPOS(Z1) > 5
 				if FPOS(Z1) > (peckDistance+retractDistance) + 172 ! Keep pecking until the last stroke, go to the bottom on the last stroke
 					PTP/rev Z1, (-peckDistance - retractDistance), Z1DrillVel ! Peck
-					PTP/re Z1, retractDistance ! Retract
+					!PTP/re Z1, retractDistance ! Retract
 				else
-					PTP/ev Z1, 2 + 172, Z1DrillVel ! Move to the bottom of the travel
+					PTP/ev Z1, 2, Z1DrillVel ! Move to the bottom of the travel
 				end
 			
 			else
-				localState = 200
+				drillLocalState = 200
 				advanceState = 1
 				homeZ1 = 1
 				WAIT 1000
@@ -323,6 +368,7 @@ WHILE running=1
 				HALT Drill
 				DISABLE Drill
 				DISABLE Z1
+				VEL(Z1) = Z1TravelVel
 			end
 		
 		end
@@ -330,10 +376,13 @@ WHILE running=1
 		if advanceState
 			machineState = extractState
 			advanceState = 0;
-			localState = 0
+			drillLocalState = 0
 		end
+	else
+		drillLocalState = 0
 	end
 END
+
 STOP
 
 #4
@@ -341,52 +390,74 @@ STOP
 
 local int localState
 localState = 0
+doneExtracting = 0
 
 WHILE running = 1
-if machineState = extractState
-	
-	if localState = 0
+	if machineState = extractState
 		
-		ENABLE X1
-		ENABLE X2
+		if localState = 0
+			
+			ENABLE X1
+			ENABLE X2
+			
+			PTP/re xAxisGroup, xOffset, xOffset ! Move water extractor above the hole
+			
+			localState = 50;
+		elseif localState = 50
+			
+			ENABLE Z2
+			
+			!PTP/e Z2, 172 + 28 ! Move the water extractor down to the base of the hole
+			PTP/e Z2, 30
+			localState = 100
+			
+		elseif localState = 100
 		
-		PTP/re xAxisGroup, xOffset, xOffset ! Move water extractor above the hole
+			pellet1_h1_SetTemp = heaterSetpoint;
+			
+			WAIT 600000 ! We need to determine how long to wait before we start pumping
+			
+			localState = 150
+			
+		elseif localState = 150
+			
+			!ECAT_OUT1.4 = 1; ! Open fill valve
+			ECAT_OUT1.0 = 1; ! Turn on extractor pump
+			
+			WAIT 120000 ! Replace this to wait until the EC box is full TILL AIN0 = ...
+			
+			ECAT_OUT1.0 = 0; ! Turn off extractor pump
+			!pellet1_h1_SetTemp = 0;
+			localState = 200
+		elseif localState = 200
 		
-		localState = 50;
-	elseif localState = 50
-		
-		ENABLE Z2
-		
-		PTP/e Z2, 192 ! Move the water extractor down to the base of the hole
-		
-		localState = 100
-		
-	elseif localState = 100
-	
-		pellet1_h1_SetTemp = heaterSetpoint;
-		
-		WAIT 120000 ! We need to determine how long to wait before we start pumping
-		
-		localState = 150
-		
-	elseif localState = 150
-		
-		ECAT_OUT1.4 = 1; ! Open fill valve
-		ECAT_OUT1.0 = 1; ! Turn on extractor pump
-		
-		WAIT 300000 ! Replace this to wait until the EC box is full TILL AIN0 = ...
-		
-		ECAT_OUT1.0 = 0; ! Turn off extractor pump
-		pellet1_h1_SetTemp = 0;
-		advanceState = 1;
-		
-	end
+			IF FPOS(Z2) < 5
+				doneExtracting = 1
+			END
+			IF FPOS(Z2) - 10 > 2
+				PTP/re Z2, -10 ! Move down 10 mm
+			ELSE
+				PTP/e Z2, 2 ! Don't bottom out, go to 2 mm above 0 if not enough room to move 10mm down
+			END
+			localState = 100
+			
+			IF doneExtracting = 1
+				homeZ2 = 1
+				WAIT 1000
+				TILL currentHomingAxis = -1
+				pellet1_h1_SetTemp = 0
+			END
+			advanceState = 1;
+			
+		end
 
-	if advanceState
-		machineState = filterState
-		advanceState = 0
+		if advanceState
+			machineState = filterState
+			advanceState = 0
+		end
+	elseif machineState <> filterState
+		localState = 0
 	end
-end
 END
 STOP
 
@@ -396,40 +467,46 @@ STOP
 local int localState
 localState = 0
 WHILE running = 1
-if machineState = filterState
+	if machineState = filterState
 
-	if localState = 0
-		! Close drain and fill valves
-		ECAT_OUT1.3 = 0;
-		ECAT_OUT1.4 = 0;
-		localState = 50
+		if localState = 0
+			! Close drain and fill valves
+			!ECAT_OUT1.3 = 0;
+			!ECAT_OUT1.4 = 0;
+			localState = 50
+			
+		elseif localState = 50
+			! Set amperage setpoint and begin EC process
+			ECAT_OUT2 = 16383
+			WAIT 900000 ! Wait 15 minutes
+			ECAT_OUT2 = 8191
+			localState = 100
+		elseif localState = 100
+			ECAT_OUT1.4 = backFlush
+			ECAT_OUT1.5 = ~backFlush
+			localState = 150
+		elseif localState = 150
+			!ECAT_OUT1.3 = 1 ! Open drain valve
+			!ECAT_OUT1.1 = 1 ! Turn on the filtration pump
+			! TILL AIN0 = ... <- Wait until the EC box is empty
+			WAIT 10000	  	! <- Wait until all of the water in the tubes is pumped out
+			ECAT_OUT1.1 = 0 ! Turn off the filtration pump
+			!ECAT_OUT1.3 = 0 ! Close drain valve
+			localState = 0
+			IF doneExtracting = 0
+				machineState = extractState ! Revert back to the water extraction state
+			ELSE
+				advanceState = 1
+			END
+		end
 		
-	elseif localState = 50
-		! Set amperage setpoint and begin EC process
-		ECAT_OUT2 = 16383
-		WAIT 900000 ! Wait 15 minutes
-		localState = 100
-	elseif localState = 100
-		ECAT_OUT1.5 = backFlush
-		ECAT_OUT1.6 = ~backFlush
-		localState = 150
-	elseif localState = 150
-		ECAT_OUT1.3 = 1 ! Open drain valve
-		ECAT_OUT1.1 = 1 ! Turn on the filtration pump
-		! TILL AIN0 = ... <- Wait until the EC box is empty
-		WAIT 10000	  	! <- Wait until all of the water in the tubes is pumped out
-		ECAT_OUT1.1 = 0 ! Turn off the filtration pump
-		ECAT_OUT1.3 = 0 ! Close drain valve
-		! machineState = extractState ! Revert back to the water extraction state
-		localState = 0
-		advanceState = 1
+		if advanceState
+			machineState = 300
+			advanceState = 0
+		end
+	else
+		localState = 0;
 	end
-	
-	if advanceState
-		machineState = 300
-		advanceState = 0
-	end
-end
 END
 STOP
 
@@ -444,13 +521,37 @@ END
 STOP
 
 #7
+local int i
+local int j
+local int n
+global real z1_pwr_arr(20)
+global real water_level_arr(20)
+global real water_level_corrected
+
+i = 1
+j = 0
+n = 20
+
+local real new_avg
+local real old_avg
+
 while 1
+
 	BLOCK
-	framePwr = RMS(Z1)
-	drillPwr = RMS(Drill)
-	!totalPwr = drillPwr + framePwr;
+	framePwr = RMS(Z1)/100*15*24;
+	drillPwr = RMS(Drill)/100*15*24
+	waterExPwr = 0.2*24*ECAT_OUT1.0 + 75*ECAT_OUT1.2
+	filterPwr = 2*10*ECAT_OUT1.5 + 10*ECAT_OUT1.6 + 0.2*24*ECAT_OUT1.1
+	totalPwr = drillPwr + framePwr + waterExPwr + filterPwr;
 	drillRPM = FVEL(Drill)*60;
-	heatTemp = PELLET1_TC1/10;
+	heatTemp = PELLET1_TC1/10 - 12;
+	waterLevel = -0.0138*water_level_corrected+28.609
+	depth = top_surface - FPOS(Z1)
+	IF wob_top_surface - FPOS(Z1) < 0
+		drillWOB = 0
+	ELSE
+		drillWOB = 0.196*(wob_top_surface - FPOS(Z1))*(wob_top_surface - FPOS(Z1))+2.296*(wob_top_surface - FPOS(Z1))+0.2218
+	END
 	!DISP FAULT(1).#ENC
 	
 	!VEL(Drill) = drillVel
@@ -461,6 +562,40 @@ while 1
  	!ACC(Z1) = Z1Accel
 	!JERK(Z1) = Z1Jerk
 	END
+	!SPDC/r data_a,2,0.05,0,addr_a
+	!SPDC/r data_b,2,0.05,0,addr_a
+	!local real a,b, rms
+	!a = (data_a(0) + data_a(1))/2
+	!b = (data_b(0) + data_b(1))/2
+	!rms = sqrt(1/2*(a*a+b*b))
+	!framePwr = b
+	!wait 50
+	if i < n+1
+		!z1_pwr_arr(i) = RMS(Z1)
+		old_avg = (old_avg*(n-1) + ECAT_IN_water_level)/i;
+		i = i + 1
+	else
+	!	local int m
+	!	m = n-1
+	!	j = 0
+	!	loop m
+	!		z1_pwr_arr(j) = z1_pwr_arr(j+1)
+	!		j=j+1
+	!	end
+	!	z1_pwr_arr(n-1) = RMS(Z1)
+	!	j = 0
+	!	loop n
+	!		z1_pwr_sum = z1_pwr_sum + z1_pwr_arr(j)
+	!		j=j+1
+	!	end
+	!	framePwr = z1_pwr_sum/n
+	!	z1_pwr_sum = 0
+	!end
+	new_avg = old_avg * (n-1)/n + ECAT_IN_water_level/n
+	old_avg = new_avg
+	water_level_corrected = new_avg
+	!framePwr = new_avg
+	end
 END
 
 ON persistentChanged
@@ -543,8 +678,8 @@ STARTPOINT:
 ENABLEON
 bed_state = 1
 
-pellet1_h1_Kp = 10
-pellet1_h1_Ki = 500
+pellet1_h1_Kp = 60
+pellet1_h1_Ki = 150
 pellet1_h1_Kd = 0.5
 pellet1_h1_LastInput = PELLET1_TC1 / 10   !bekhoff needs to be divided by 10 
 pellet1_h1_ITerm = pellet1_h1_Output
@@ -567,7 +702,7 @@ while 1
 			pellet1_h1_SetPoint = pellet1_h1_SetTemp
 			
 			!Read temperature values
-			pellet1_h1_InputTemp = PELLET1_TC1 / 10
+			pellet1_h1_InputTemp = PELLET1_TC1 / 10-12
 			
 			!Compute working error variables
 			pellet1_h1_Error = pellet1_h1_SetPoint - pellet1_h1_InputTemp
@@ -803,6 +938,10 @@ Index_Home_X:
 	KDEC(X2) = 1000
 	FMASK(X2).#SRL = 0
 	FMASK(X2).#SLL = 0
+	IF RPOS(Z1) < 600 | RPOS(Z2) < 600
+		DISP "Please home Z1 and Z2 first"
+		RET
+	END
 	ENABLE (X1,X2)
 	JOG/v (X1, X2), -10  !jog towards limit
 	TILL ECAT_IN1.5=1 | ECAT_IN1.6=1
@@ -952,6 +1091,10 @@ ON MST(X1).#MOVE
 		HALT (X1, X2)
 		KILL (X1, X2)
 		DISP "Z1 Axis too low to move gantry!"
+		IF currentHomingAxis = X1
+			currentHomingAxis = -1
+			homeAxis.3 = 0
+		END
 	END
 
 
@@ -991,57 +1134,82 @@ ON ECAT_IN1.1 = 1
 RET
 
 #11
-global real Z1_RMS_limit
-global real Z1_Jog_state 
-global real Z1_fmax
-global real Z1_fmin 
+!VEL(Z1) = -1
 
-!Configure user values
-Z1_RMS_limit = 6
-Z1_Jog_state =1
-Z1_fmax = -10
-Z1_fmin = 0
+!ENABLE Z1
+!ENABLE Drill
 
-VEL(Z1) = -1
+!JOG Z1
+!DISP  "Drilling Started"
+!ON machineState = drillState
+!	WHILE machineState = drillState
 
-ENABLE Z1
-ENABLE Drill
-
-JOG Z1
-DISP  "Drilling Started"
-
-WHILE Z1_Jog_state = 1
-
-	IF machineState <> coreState
-		IF RMS(Z1) > Z1_RMS_limit & VEL(Z1) < Z1_fmin
-			IMM VEL(Z1) = VEL(Z1) + 0.1
-			DISP "Exceeded RMS, slowing feed"
-		END
+!		IF RMS(Drill) > Drill_RMS_limit! & VEL(Z1) > Z1_fmin
+			!IMM VEL(Z1) = VEL(Z1) - 0.1
+!			PAUSE 3
+!			PTP/rev Z1, 20, 20
+!			TILL RMS(Drill) < Drill_RMS_limit*0.8
+!			RESUME 3
+!			DISP "Exceeded Drill RMS, slowing feed"
+!		END
 		
-		IF RMS(Z1) < Z1_RMS_limit & VEL(Z1) > Z1_fmax
-			IMM VEL(Z1) = VEL(Z1) - 0.1
-			DISP "Feed increased"
-		END
+!		IF RMS(Z1) > Z1_RMS_limit & VEL(Z1)! > Z1_fmin
+			!IMM VEL(Z1) = VEL(Z1) - 0.1
+!			PAUSE 3
+!			PTP/rev Z1, 5, 5
+!			TILL RMS(Z1) < Z1_RMS_limit*0.8
+!			RESUME 3
+!			DISP "Exceeded Z1 RMS, slowing feed"
+!		END
 		
-		WAIT 50
-	END
-END
-
+		!IF RMS(Drill) < Drill_RMS_limit & RMS(Z1) < Z1_RMS_limit & VEL(Z1) < Z1_fmax
+		!	IMM VEL(Z1) = VEL(Z1) + 0.1
+		!	DISP "Feed increased"
+		!END
+		
+! 		WAIT 50
+!	END
+!RET
 
 
 STOP ! Ends program 
 
+ON RMS(Drill) > Drill_RMS_limit
+	IF machineState = drillState & drillLocalState > 50 & drillLocalState < 200
+		PAUSE 3
+		HALT Z1
+		IF FPOS(Z1) + 5 < 700
+			PTP/rev Z1, 5, 20
+		END
+		TILL RMS(Drill) < Drill_RMS_limit*0.8
+		RESUME 3
+		DISP "Exceeded Drill RMS, slowing feed"
+	END
+RET
 
-!Begin autoroutines
-ON Z1_Jog_state =1 
-	!JOG Z1, -
+ON RMS(Z1) > Z1_RMS_limit
+	IF machineState = drillState & drillLocalState > 50 & drillLocalState < 200
+		PAUSE 3
+		HALT Z1
+		IF FPOS(Z1) + 5 < 700
+			PTP/rev Z1, 5, 20
+		END
+		TILL RMS(Z1) < Z1_RMS_limit*0.8
+		RESUME 3
+		DISP "Exceeded Z1 RMS, slowing feed"
+	END
 RET
-ON Z1_Jog_state =0
-	HALT ALL
-	STOP 11
-	WAIT 1000
-	PTP/rev (Z1), 50, 35
+
+ON RMS(Z1) < Z1_RMS_limit & RMS(Drill) < Drill_RMS_limit & machineState = drillState & drillLocalState > 50 & drillLocalState < 200
+	WHILE RMS(Z1) < Z1_RMS_limit & RMS(Drill) < Drill_RMS_limit & machineState = drillState & drillLocalState > 50 & drillLocalState < 200
+		ROP = FVEL(Z1)
+	END
 RET
+
+#12
+!ON RMS(Drill) > 40
+	!IF machineState = drillState 
+!RET
 
 #13
 !This buffer is ONLY for autoroutines that are run in background 
@@ -1531,8 +1699,9 @@ global real drillPwr
 global real waterExPwr
 global real filterPwr
 global real totalPwr
-
+global real depth
 global int holeCount
+global real wob_top_surface
 
 ! Coring vars
 global int coreSamples
@@ -1544,10 +1713,19 @@ global real peckDistance
 global real retractDistance
 global real holeSpacing
 global int numHoles
+global real Z1_RMS_limit
+global real Z1_Jog_state 
+global real Z1_fmax
+global real Z1_fmin 
+global real Drill_RMS_limit
+global int drillLocalState
+global real top_surface
+global real ROP
 
 ! Water Extract Vars
 global real xOffset
 global real heaterSetpoint
+global int doneExtracting
 
 ! Filtration vars
 global int backFlush
@@ -1557,6 +1735,7 @@ global int enableSloshing
 global real sloshAmplitude
 global real sloshFrequency
 global real sloshTime
+global real waterLevel
 
 ! Heater control vars
 global int pellet1_h1_SetTemp
@@ -1569,6 +1748,8 @@ global int ECAT_OUT1 ! Digital Out
 global int ECAT_OUT2 ! Analog Out 1
 global int ECAT_OUT3 ! Analog Out 2
 global int ECAT_IN1  ! Digital In 1
+global int ECAT_IN_amperage
+global int ECAT_IN_water_level
 
 ! Jog Control vars
 global real jogX
@@ -1582,6 +1763,8 @@ global int homeZ2
 global int isXHomed
 global int isZ1Homed
 global int isZ2Homed
+global real WOB_set_point
+
 
 ! Homing vars
 global int currentHomingAxis
